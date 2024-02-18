@@ -103,8 +103,10 @@ class BashKernel(Kernel):
         Kernel.__init__(self, **kwargs)
         self._start_bash()
         self._known_display_ids = set()
+        self.user = os.getlogin()
+        self.sessions = []
 
-    def _start_bash(self):
+    def _start_bash(self, code=None):
         # Signal handlers are inherited by forked processes, and we can't easily
         # reset it from the subprocess. Since kernelapp ignores SIGINT except in
         # message handlers, we need to temporarily reset the SIGINT handler here
@@ -115,13 +117,25 @@ class BashKernel(Kernel):
         # producers. 
         old_sigpipe_handler = signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         try:
+            # Store previous session if exists
+            if hasattr(self, 'bashwrapper'):
+                self.sessions.append((self.bashwrapper, self.user))
+
             # Note: the next few lines mirror functionality in the
             # bash() function of pexpect/replwrap.py.  Look at the
             # source code there for comments and context for
             # understanding the code here.
             bashrc = os.path.join(os.path.dirname(pexpect.__file__), 'bashrc.sh')
-            child = pexpect.spawn("bash", ['--rcfile', bashrc], echo=False,
-                                  encoding='utf-8', codec_errors='replace')
+            if code is None:
+                child = pexpect.spawn("bash",  ["--rcfile", bashrc], echo=False,
+                                      encoding='utf-8', codec_errors='replace')
+            else:
+                if code.startswith("su "):
+                    self.user = next((arg for arg in code.strip().split(' ') if not arg.startswith("-") and (arg != "su")), "root")
+                prog = "/bin/bash" if code.startswith("su ") else code
+                prog = prog.replace("bash", "bash --rcfile " + bashrc)
+                child = pexpect.spawn("su",  [self.user, "-c", prog], echo=False,
+                                      encoding='utf-8', codec_errors='replace')
             # Following comment stolen from upstream's REPLWrap:
             # If the user runs 'env', the value of PS1 will be in the output. To avoid
             # replwrap seeing that as the next prompt, we'll embed the marker characters
@@ -185,6 +199,12 @@ class BashKernel(Kernel):
 
     def do_execute(self, code, silent, store_history=True,
                    user_expressions=None, allow_stdin=False):
+
+        if code.startswith("su ") or "bash" in code:
+            self._start_bash(code)
+            return {'status': 'ok', 'execution_count': self.execution_count,
+                    'payload': [], 'user_expressions': {}}
+
         self.silent = silent
         if not code.strip():
             return {'status': 'ok', 'execution_count': self.execution_count,
@@ -216,9 +236,12 @@ class BashKernel(Kernel):
             output = self.bashwrapper.child.before
             self.process_output(output)
         except EOF:
-            output = self.bashwrapper.child.before + 'Restarting Bash'
-            self._start_bash()
-            self.process_output(output)
+            if len(self.sessions) > 0:
+                (self.bashwrapper, self.user) = self.sessions.pop()
+            else:
+                output = self.bashwrapper.child.before + 'Restarting Bash'
+                self._start_bash()
+                self.process_output(output)
 
         if interrupted:
             return {'status': 'abort', 'execution_count': self.execution_count}
