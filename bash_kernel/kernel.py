@@ -130,8 +130,7 @@ class IREPLWrapper(replwrap.REPLWrapper):
                     self._expect_prompt(1)
                     return
                 else:
-                    if not su.match(code) and not bash.match(code) and not env.match(code)\
-                            and len(self.child.before) != 0:
+                    if len(self.child.before) != 0:
                         # Prompt received, but partial line precedes it.
                         self.line_output_callback(self.child.before)
                     break
