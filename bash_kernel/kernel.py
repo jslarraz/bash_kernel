@@ -1,4 +1,5 @@
 from ipykernel.kernelbase import Kernel
+from IPython.display import clear_output
 from pexpect import replwrap, EOF
 import pexpect
 
@@ -36,12 +37,12 @@ class IREPLWrapper(replwrap.REPLWrapper):
       of incremental output. It takes one string parameter.
     """
     def __init__(self, cmd_or_spawn, orig_prompt, prompt_change, unique_prompt,
-                 extra_init_cmd=None, line_output_callback=None, getpass=None):
+                 extra_init_cmd=None, line_output_callback=None, kernel=None):
         self.prompt_change = prompt_change
         self.extra_init_cmd = extra_init_cmd
         self.unique_prompt = unique_prompt
         self.line_output_callback = line_output_callback
-        self.getpass = getpass
+        self.kernel = kernel
         # The extra regex at the start of PS1 below is designed to catch the
         # `(envname) ` which conda/mamba add to the start of PS1 by default.
         # Obviously anything else that looks like this, including user output,
@@ -67,6 +68,8 @@ class IREPLWrapper(replwrap.REPLWrapper):
             prompts.extend(['\r?\n', '\r'])
             while True:
                 pos = self.child.expect_list([re.compile(x) for x in prompts], timeout=None)
+                if os.getenv("BASH_KERNEL_TRIM_OUTPUT") is not None:
+                    self.kernel.send_response(self.kernel.iopub_socket, 'clear_output', content={'wait': True})
                 if pos == 2:
                     # End of line received.
                     self.line_output_callback(self.child.before + '\n')
@@ -113,7 +116,7 @@ class IREPLWrapper(replwrap.REPLWrapper):
                         self.line_output_callback(self.child.before)
                     self.child.expect_exact(':')
                     self.line_output_callback(prompts[pos].replace("\\", "") + self.child.before + self.child.after + '\n')
-                    password = self.getpass()
+                    password = self.kernel.getpass()
                     self.child.sendline(password)
                     timeout = None  # Ensure we wait long enough to catch wrong password cases
                 elif pos in [6, 7, 8, 9, 10, 11]:
@@ -206,7 +209,7 @@ class BashKernel(Kernel):
             self.bashwrapper = IREPLWrapper(child, u'\$', prompt_change, self.unique_prompt,
                                             extra_init_cmd="export PAGER=cat",
                                             line_output_callback=self.process_output,
-                                            getpass=self.getpass)
+                                            kernel=self)
         finally:
             signal.signal(signal.SIGINT, old_sigint_handler)
             signal.signal(signal.SIGPIPE, old_sigpipe_handler)
