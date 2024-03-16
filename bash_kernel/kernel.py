@@ -10,6 +10,7 @@ import string
 
 import re
 import signal
+import time
 
 __version__ = '0.9.3'
 
@@ -66,8 +67,8 @@ class IREPLWrapper(replwrap.REPLWrapper):
     def run_command(self, command, timeout=-1, async_=False):
 
         self.prompts = self.all_prompts if True in [cmd.match(command) is not None for cmd in special_commands] else self.all_prompts[:4]
-        command = command + " -s /bin/bash" if su.match(command) else command
-        res = super().run_command(command, timeout=timeout, async_=async_)
+        self.command = command + " -s /bin/bash" if su.match(command) else command
+        res = super().run_command(self.command, timeout=timeout, async_=async_)
 
         # Initialization
         if su.match(command) or bash.match(command) or env.match(command):
@@ -82,16 +83,23 @@ class IREPLWrapper(replwrap.REPLWrapper):
             # "None" means we are executing code from a Jupyter cell by way of the run_command
             # in the do_execute() code below, so do incremental output, i.e.
             # also look for end of line or carridge return
+            buffer = ""
+            tic = time.time()
             while True:
                 pos = self.child.expect_list(self.prompts, timeout=None)
+                if pos not in [0, 1, 10, 11]:
+                    buffer += self.child.before + self.child.after
+                if (buffer != "") and ((not self.command.startswith(".configure") and not self.command.startswith("make")) or (time.time() - tic > 0.2)):
+                    if self.command.startswith(".configure") or self.command.startswith("make"):
+                        self.kernel.send_response(self.kernel.iopub_socket, 'clear_output', content={'wait': True})
+                    self.kernel.process_output(buffer)
+                    buffer = ""
+                    tic = time.time()
                 if pos in [0, 1]:
-                    if len(self.child.before) > 0 and len(self.prompts) == 4:
-                        self.kernel.process_output(self.child.before)
                     break
                 elif pos in [2, 3] + [6, 7, 8, 9]:
-                    self.kernel.process_output(self.child.before + self.child.after)
+                    continue
                 elif pos in [4, 5]:
-                    self.kernel.process_output(self.child.before + self.child.after)
                     password = self.kernel.getpass()
                     self.child.sendline(password)
                 elif pos in [10, 11]:
