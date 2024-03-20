@@ -66,6 +66,7 @@ class IREPLWrapper(replwrap.REPLWrapper):
 
     def run_command(self, command, timeout=-1, async_=False):
 
+        command = re.sub("\\\\ *\n", "", command)   # Ensure each command is passed in one line
         self.prompts = self.all_prompts if True in [cmd.match(command) is not None for cmd in special_commands] else self.all_prompts[:4]
         self.command = command + " -s /bin/bash" if su.match(command) else command
         res = super().run_command(self.command, timeout=timeout, async_=async_)
@@ -84,13 +85,15 @@ class IREPLWrapper(replwrap.REPLWrapper):
             # in the do_execute() code below, so do incremental output, i.e.
             # also look for end of line or carridge return
             buffer = ""
+            output_len = 0
             tic = time.time()
             while True:
                 pos = self.child.expect_list(self.prompts, timeout=None)
                 if pos not in [0, 1, 10, 11]:
                     buffer += self.child.before + self.child.after
-                if (buffer != "") and ((not self.command.startswith(".configure") and not self.command.startswith("make")) or (time.time() - tic > 0.2)):
-                    if self.command.startswith(".configure") or self.command.startswith("make"):
+                if (buffer != "") and ((time.time() - tic > 0.12) or pos in [0, 1]):
+                    output_len += buffer.count('\n')
+                    if os.getenv("BASH_KERNEL_TRIM_OUTPUT") and output_len > int(os.getenv("BASH_KERNEL_TRIM_OUTPUT")):
                         self.kernel.send_response(self.kernel.iopub_socket, 'clear_output', content={'wait': True})
                     self.kernel.process_output(buffer)
                     buffer = ""
