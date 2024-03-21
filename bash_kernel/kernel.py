@@ -68,7 +68,7 @@ class IREPLWrapper(replwrap.REPLWrapper):
 
         command = re.sub("\\\\ *\n", "", command)   # Ensure each command is passed in one line
         self.prompts = self.all_prompts if True in [cmd.match(command) is not None for cmd in special_commands] else self.all_prompts[:4]
-        self.command = command + " -s /bin/bash" if su.match(command) else command
+        self.command = command.replace("su", "su -s /bin/bash") if (su.match(command) and (" -s " not in command)) else command
         res = super().run_command(self.command, timeout=timeout, async_=async_)
 
         # Initialization
@@ -91,7 +91,7 @@ class IREPLWrapper(replwrap.REPLWrapper):
                 pos = self.child.expect_list(self.prompts, timeout=None)
                 if pos not in [0, 1, 10, 11]:
                     buffer += self.child.before + self.child.after
-                if (buffer != "") and ((time.time() - tic > 0.12) or pos in [0, 1]):
+                if (buffer != "") and ((time.time() - tic > 0.12) or (pos not in [2, 3])):
                     output_len += buffer.count('\n')
                     if os.getenv("BASH_KERNEL_TRIM_OUTPUT") and output_len > int(os.getenv("BASH_KERNEL_TRIM_OUTPUT")):
                         self.kernel.send_response(self.kernel.iopub_socket, 'clear_output', content={'wait': True})
