@@ -67,15 +67,15 @@ class IREPLWrapper(replwrap.REPLWrapper):
     def run_command(self, command, timeout=-1, async_=False):
 
         command = re.sub("\\\\ *\n", "", command)   # Ensure each command is passed in one line
-        self.prompts = self.all_prompts if True in [cmd.match(command) is not None for cmd in special_commands] else self.all_prompts[:4]
-        self.command = command.replace("su", "su -s /bin/bash") if (su.match(command) and (" -s " not in command)) else command
-        res = super().run_command(self.command, timeout=timeout, async_=async_)
-
-        # Initialization
-        if su.match(command) or bash.match(command) or env.match(command):
-            self.run_command(self.extra_init_cmd)
-            self.run_command("bind 'set enable-bracketed-paste off' >/dev/null 2>&1 || true")
-            # self.run_command(build_cmds())
+        # TODO: Add support for "su -c bash"
+        if bash.match(command) or env.match(command) or (su.match(command) and " -c " not in command):
+            self.prompts = self.all_prompts
+        elif True in [cmd.match(command) is not None for cmd in special_commands]:
+            self.prompts = self.all_prompts[:10]
+        else:
+            self.prompts = self.all_prompts[:4]
+        command = command.replace("su", "su -s /bin/bash") if (su.match(command) and (" -s " not in command)) else command
+        res = super().run_command(command, timeout=timeout, async_=async_)
         return res
 
     def _expect_prompt(self, timeout=-1):
@@ -107,6 +107,10 @@ class IREPLWrapper(replwrap.REPLWrapper):
                     self.child.sendline(password)
                 elif pos in [10, 11]:
                     self.child.sendline(self.prompt_change)
+                    self.prompts = self.prompts[:4]
+                    self.run_command(self.extra_init_cmd)
+                    self.run_command("bind 'set enable-bracketed-paste off' >/dev/null 2>&1 || true")
+                    # self.run_command(build_cmds())
                 else:
                     raise Exception("Unexpected prompt")
         else:
