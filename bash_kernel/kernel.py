@@ -59,7 +59,7 @@ class IREPLWrapper(replwrap.REPLWrapper):
                                                     u"\[sudo\] password for .*:",
                                                     u"su: .*\n", u"sudo: .*\n",
                                                     u"chroot: .*\n", u"passwd: .*\n",
-                                                    "\$", "\#"]]
+                                                    r"$", r"#"]]
         replwrap.REPLWrapper.__init__(self, cmd_or_spawn, orig_prompt,
                 prompt_change, new_prompt=self.ps1_re,
                 continuation_prompt=self.ps2_re, extra_init_cmd=extra_init_cmd)
@@ -76,6 +76,12 @@ class IREPLWrapper(replwrap.REPLWrapper):
             self.prompts = self.all_prompts[:4]
         command = command.replace("su", "su -s /bin/bash") if (su.match(command) and (" -s " not in command)) else command
         res = super().run_command(command, timeout=timeout, async_=async_)
+
+        # Initialize shell
+        if bash.match(command) or env.match(command) or (su.match(command) and " -c " not in command):
+            self.run_command(self.extra_init_cmd)
+            self.run_command("bind 'set enable-bracketed-paste off' >/dev/null 2>&1 || true")
+            # self.run_command(build_cmds())
         return res
 
     def _expect_prompt(self, timeout=-1):
@@ -107,10 +113,6 @@ class IREPLWrapper(replwrap.REPLWrapper):
                     self.child.sendline(password)
                 elif pos in [10, 11]:
                     self.child.sendline(self.prompt_change)
-                    self.prompts = self.prompts[:4]
-                    self.run_command(self.extra_init_cmd)
-                    self.run_command("bind 'set enable-bracketed-paste off' >/dev/null 2>&1 || true")
-                    # self.run_command(build_cmds())
                 else:
                     raise Exception("Unexpected prompt")
         else:
