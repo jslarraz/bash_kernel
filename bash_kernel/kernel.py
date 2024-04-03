@@ -18,13 +18,18 @@ version_pat = re.compile(r'version (\d+(\.\d+)+)')
 
 from .display import (extract_contents, build_cmds)
 
-# Special command patterns
-su = re.compile("(sudo )? *((\/usr)?\/bin\/)?su( +|$).*")
-env = re.compile("(sudo )? *((\/usr)?\/bin\/)?(chroot |env |exec )(.* )?((\/usr)?\/bin\/)?bash( +|$).*")
-bash = re.compile("(sudo )? *((\/usr)?\/bin\/)?bash( +|$).*")
-passwd = re.compile("(sudo )? *((\/usr)?\/bin\/)?passwd( +|$).*")
-sudo = re.compile("sudo .+")
-special_commands = [su, env, bash, passwd, sudo] if os.getenv("BASH_KERNEL_SPECIAL_COMMANDS") is not None else []
+class Command:
+
+    def __init__(self, command):
+        self.command = re.sub("\\\\ *\n", "", command)   # Ensure each command is passed in one line
+        if self.match("su") and (" -s " not in command):
+            match = self.match("su")
+            self.command = self.command[:match.start(1)] + "su -s /bin/bash" + self.command[match.end(1):]
+
+    def match(self, cmd):
+        patt = "(?:{cmd})*{cmd}".format(cmd="(?:(?:\/usr)?\/bin\/)?%s(?: .*|$)") % ("(?:sudo|chroot|env|exec)", "(%s)")
+        return re.match(patt % cmd, self.command)
+
 
 class IREPLWrapper(replwrap.REPLWrapper):
     """A subclass of REPLWrapper that gives incremental output
@@ -54,31 +59,28 @@ class IREPLWrapper(replwrap.REPLWrapper):
         # through a cell.
         self.ps1_re = r"(\(\w+\) )?" + re.escape(self.unique_prompt + ">")
         self.ps2_re = re.escape(self.unique_prompt + "+")
-        self.all_prompts = [re.compile(x) for x in [self.ps1_re, self.ps2_re, '\r?\n', '\r',
-                                                    u"((Retype )?[Nn]ew )?[Pp]assword:",
-                                                    u"\[sudo\] password for .*:",
-                                                    u"su: .*\n", u"sudo: .*\n",
-                                                    u"chroot: .*\n", u"passwd: .*\n",
-                                                    r"$", r"#"]]
         replwrap.REPLWrapper.__init__(self, cmd_or_spawn, orig_prompt,
                 prompt_change, new_prompt=self.ps1_re,
                 continuation_prompt=self.ps2_re, extra_init_cmd=extra_init_cmd)
 
     def run_command(self, command, timeout=-1, async_=False):
 
-        command = re.sub("\\\\ *\n", "", command)   # Ensure each command is passed in one line
+        cmd = Command(command)
+        self.prompts = [self.ps1_re, self.ps2_re, '\r?\n', '\r']
+        if True in [cmd.match(x) is not None for x in ["sudo", "passwd", "su", "bash"]]:
+            self.prompts += [
+                u"((Retype )?[Nn]ew )?[Pp]assword:",
+                u"\[sudo\] password for .*:",
+                u"su: .*\n", u"sudo: .*\n",
+                u"chroot: .*\n", u"passwd: .*\n",
+            ]
         # TODO: Add support for "su -c bash"
-        if bash.match(command) or env.match(command) or (su.match(command) and " -c " not in command):
-            self.prompts = self.all_prompts
-        elif True in [cmd.match(command) is not None for cmd in special_commands]:
-            self.prompts = self.all_prompts[:10]
-        else:
-            self.prompts = self.all_prompts[:4]
-        command = command.replace("su", "su -s /bin/bash") if (su.match(command) and (" -s " not in command)) else command
-        res = super().run_command(command, timeout=timeout, async_=async_)
+        if cmd.match("bash") or (cmd.match("su") and " -c " not in cmd.command):
+            self.prompts += ["\$", "\#"]
+        res = super().run_command(cmd.command, timeout=timeout, async_=async_)
 
         # Initialize shell
-        if bash.match(command) or env.match(command) or (su.match(command) and " -c " not in command):
+        if cmd.match("bash") or (cmd.match("su") and " -c " not in cmd.command):
             self.run_command(self.extra_init_cmd)
             self.run_command("bind 'set enable-bracketed-paste off' >/dev/null 2>&1 || true")
             # self.run_command(build_cmds())
@@ -94,25 +96,25 @@ class IREPLWrapper(replwrap.REPLWrapper):
             output_len = 0
             tic = time.time()
             while True:
-                pos = self.child.expect_list(self.prompts, timeout=None)
-                if pos not in [0, 1, 10, 11]:
+                pos = self.child.expect_list([re.compile(x) for x in self.prompts], timeout=None)
+                if self.prompts[pos] not in [self.ps1_re, self.ps2_re, "\$", "\#"]:
                     buffer += self.child.before + self.child.after
-                if (buffer != "") and ((time.time() - tic > 0.12) or (pos not in [2, 3])):
+                if (buffer != "") and ((time.time() - tic > 0.12) or (self.prompts[pos] not in ['\r?\n', '\r'])):
                     output_len += buffer.count('\n')
                     if os.getenv("BASH_KERNEL_TRIM_OUTPUT") and output_len > int(os.getenv("BASH_KERNEL_TRIM_OUTPUT")):
                         self.kernel.send_response(self.kernel.iopub_socket, 'clear_output', content={'wait': True})
                     self.kernel.process_output(buffer)
                     buffer = ""
                     tic = time.time()
-                if pos in [0, 1]:
-                    break
-                elif pos in [2, 3] + [6, 7, 8, 9]:
+                if self.prompts[pos] in ['\r?\n', '\r', u"su: .*\n", u"sudo: .*\n", u"chroot: .*\n", u"passwd: .*\n"]:
                     continue
-                elif pos in [4, 5]:
+                elif self.prompts[pos] in [u"((Retype )?[Nn]ew )?[Pp]assword:", u"\[sudo\] password for .*:"]:
                     password = self.kernel.getpass()
                     self.child.sendline(password)
-                elif pos in [10, 11]:
+                elif self.prompts[pos] in ["\$", "\#"]:
                     self.child.sendline(self.prompt_change)
+                elif self.prompts[pos] in [self.ps1_re, self.ps2_re]:
+                    break
                 else:
                     raise Exception("Unexpected prompt")
         else:
