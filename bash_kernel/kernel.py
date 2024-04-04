@@ -92,28 +92,19 @@ class IREPLWrapper(replwrap.REPLWrapper):
             # "None" means we are executing code from a Jupyter cell by way of the run_command
             # in the do_execute() code below, so do incremental output, i.e.
             # also look for end of line or carridge return
-            buffer = ""
-            output_len = 0
-            tic = time.time()
             while True:
                 pos = self.child.expect_list([re.compile(x) for x in self.prompts], timeout=None)
-                if self.prompts[pos] not in [self.ps1_re, self.ps2_re, "\$", "\#"]:
-                    buffer += self.child.before + self.child.after
-                if (buffer != "") and ((time.time() - tic > 0.12) or (self.prompts[pos] not in ['\r?\n', '\r'])):
-                    output_len += buffer.count('\n')
-                    if os.getenv("BASH_KERNEL_TRIM_OUTPUT") and output_len > int(os.getenv("BASH_KERNEL_TRIM_OUTPUT")):
-                        self.kernel.send_response(self.kernel.iopub_socket, 'clear_output', content={'wait': True})
-                    self.kernel.process_output(buffer)
-                    buffer = ""
-                    tic = time.time()
                 if self.prompts[pos] in ['\r?\n', '\r', u"su: .*\n", u"sudo: .*\n", u"chroot: .*\n", u"passwd: .*\n"]:
-                    continue
+                    self.kernel.process_output(self.child.before + self.child.after, clear_th=os.getenv("BASH_KERNEL_TRIM_OUTPUT"))
                 elif self.prompts[pos] in [u"((Retype )?[Nn]ew )?[Pp]assword:", u"\[sudo\] password for .*:"]:
+                    self.kernel.process_output(self.child.before + self.child.after, flush=True)
                     password = self.kernel.getpass()
                     self.child.sendline(password)
                 elif self.prompts[pos] in ["\$", "\#"]:
                     self.child.sendline(self.prompt_change)
                 elif self.prompts[pos] in [self.ps1_re, self.ps2_re]:
+                    self.child.before = self.child.before.replace("\x1b[?2004h", "")
+                    self.kernel.process_output(self.child.before, finish=True)
                     break
                 else:
                     raise Exception("Unexpected prompt")
@@ -196,14 +187,36 @@ class BashKernel(Kernel):
         self.bashwrapper.run_command(build_cmds())
 
 
-    def process_output(self, output):
+    def process_output(self, output, flush=False, clear_th=None, finish=False):
         if hasattr(self, "silent") and not self.silent:
             plain_output, rich_contents = extract_contents(output)
 
-            # Send standard output
-            if plain_output:
-                stream_content = {'name': 'stdout', 'text': plain_output}
+            # Initialize on first call for each command
+            if not hasattr(self, "buffer"):
+                self.buffer = ""
+                self.output_len = 0
+                self.tic = time.time()
+
+            self.buffer += plain_output
+            if (self.buffer.strip(" \n\r") != "") and ((time.time() - self.tic > 0.12) or flush or finish):
+
+                # If clear_th is not none, send clear_output when the output has more than clear_th lines
+                self.output_len += self.buffer.count('\n')
+                if clear_th and self.output_len > int(clear_th):
+                    self.send_response(self.iopub_socket, 'clear_output', content={'wait': True})
+
+                # Send the output to the frontend
+                stream_content = {'name': 'stdout', 'text': self.buffer}
                 self.send_response(self.iopub_socket, 'stream', stream_content)
+
+                self.buffer = ""
+                self.tic = time.time()
+
+            # Clear state if finish flag is set
+            if finish:
+                del self.buffer
+                del self.output_len
+                del self.tic
 
             # Send rich contents, if any:
             for content in rich_contents:
